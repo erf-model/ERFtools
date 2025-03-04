@@ -1,7 +1,7 @@
 import numpy as np
 import xarray as xr
 
-from ..constants import CONST_GRAV
+from .constants import CONST_GRAV
 
 def get_stag_dims(ds_cc):
     stag_dims = {dim if dim != 'bottom_top' else 'bottom_top_stag': size

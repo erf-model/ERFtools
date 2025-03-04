@@ -11,7 +11,7 @@ from setuptools import find_packages, setup
 
 # Package meta-data.
 NAME = 'erftools'
-DESCRIPTION = 'Scripts for facilitating the usage of the Energy Research Forecasting model'
+DESCRIPTION = 'Scripts to make life easier for users of the Energy Research & Forecasting model'
 URL = 'https://github.com/erf-model/erftools'
 EMAIL = 'eliot.quon@nrel.gov'
 AUTHOR = 'U.S. Department of Energy'
@@ -21,11 +21,13 @@ VERSION = '0.1.1'
 # What packages are required for this module to be executed?
 REQUIRED = [
     # core
-    'f90nml',
     'numpy>=1.18.1',
     'pandas>=1.0.1',
     'xarray>=0.15.0',
     'netcdf4>=1.5.1',
+    'pydantic',
+    'f90nml',
+    'cartopy',
     #'matplotlib>=3',
     #'scipy>=1.4.1',
     #'dask>=2.10.1',

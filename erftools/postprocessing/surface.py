@@ -35,7 +35,7 @@ class SurfaceHistory(object):
         """
         df = pd.read_csv(histfile, sep='\s+', names=self.surfvars)
         if np.any(df.duplicated('t')):
-            print('Note: One or more restarts found in the history file,' \
+            print(f'Note: One or more restarts found in {histfile},'
                   ' loading the latest')
         df = df.drop_duplicates('t')
         if dt is not None:

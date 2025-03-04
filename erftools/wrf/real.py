@@ -4,22 +4,7 @@ import xarray as xr
 from scipy.optimize import root_scalar
 
 from ..constants import R_d, Cp_d, Gamma, CONST_GRAV, p_0
-from .utils import get_lo_faces, get_hi_faces
-
-def blending_func(eta, etac=0.2):
-    """Relative weighting function to blend between terrain-following sigma
-    corodinate and pure pressure coordinate, B(η)
-
-    see dyn_em/nest_init_utils.F
-    """
-    if eta < etac:
-        return 0
-    B1 = 2. * etac**2 * ( 1. - etac )
-    B2 = -etac * ( 4. - 3. * etac - etac**3 )
-    B3 = 2. * ( 1. - etac**3 )
-    B4 = - ( 1. - etac**2 )
-    B5 = (1.-etac)**4
-    return ( B1 + B2*eta + B3*eta**2 + B4*eta**3 ) / B5
+from ..utils import get_lo_faces, get_hi_faces
 
 
 class RealInit(object):
@@ -27,7 +12,7 @@ class RealInit(object):
     """
 
     def __init__(self,
-                 zsurf,
+                 zsurf=None,
                  eta=None,eta_stag=None,p_d=None,
                  ptop=10e3,
                  T0=290.0,A=50.,Tmin=200.,Tlp_strat=-11.,p_strat=0.,
@@ -39,11 +24,14 @@ class RealInit(object):
         We can set constants to be 32-bit to enable closer comparisons
         with real.exe outputs (wrfinput, wrfbdy)
         """
-        assert isinstance(zsurf, (xr.Dataset, xr.DataArray)), \
-                'Only xarray data supported'
-        assert ('west_east' in zsurf.dims) and \
-               ('south_north' in zsurf.dims), \
-               'WRF dimensions expected'
+        if zsurf is None:
+            zsurf = xr.DataArray([[0]],dims=('west_east','south_north'),name='HGT')
+        else:
+            assert isinstance(zsurf, (xr.Dataset, xr.DataArray)), \
+                    'Only xarray data supported'
+            assert ('west_east' in zsurf.dims) and \
+                   ('south_north' in zsurf.dims), \
+                   'WRF dimensions expected'
         self.dtype = dtype
         self.z_surf = zsurf.astype(dtype) # WRF "HGT"
         self.g = dtype(CONST_GRAV)
@@ -67,18 +55,34 @@ class RealInit(object):
 
         # calculate hybrid coordinate
         if eta_stag is not None:
-            self.eta_stag = eta_stag.astype(dtype)
-            self.eta = 0.5*(self.eta_stag[1:] + self.eta_stag[:-1])
-            self.eta = self.eta.rename(bottom_top_stag='bottom_top')
+            if isinstance(eta_stag,list):
+                eta_stag = np.array(eta_stag)
+            eta_stag = eta_stag.astype(dtype)
+            if isinstance(eta_stag, xr.DataArray):
+                eta = 0.5*(  eta_stag.isel(bottom_top_stag=slice(1,None)).values
+                           + eta_stag.isel(bottom_top_stag=slice(0,  -1)).values )
+                self.eta = xr.DataArray(eta, dims='bottom_top', name='eta')
+                self.eta_stag = eta_stag
+            else:
+                self.eta = 0.5*(eta_stag[1:] + eta_stag[:-1])
+                self.eta = xr.DataArray(self.eta, dims='bottom_top', name='eta')
+                self.eta_stag = xr.DataArray(eta_stag, dims='bottom_top_stag', name='eta')
         else:
             if eta is None:
                 self.calc_eta(p_d)
             else:
+                if isinstance(eta,list):
+                    eta = np.array(eta)
                 self.eta = eta.astype(dtype)
-            self.eta_stag = np.zeros(len(self.eta)+1, dtype=dtype)
-            self.eta_stag[0] = 1.0
-            self.eta_stag[1:-1] = self.eta[1:] + self.eta[:-1]
-            self.eta_stag = self.eta_stag.rename(bottom_top='bottom_top_stag')
+            if isinstance(self.eta, xr.DataArray):
+                eta = self.eta.values
+            else:
+                eta = self.eta
+                self.eta = xr.DataArray(self.eta, dims='bottom_top', name='eta')
+            eta_stag = np.zeros(len(eta)+1, dtype=dtype)
+            eta_stag[0] = 1.0
+            eta_stag[1:-1] = 0.5*(eta[1:] + eta[:-1])
+            self.eta_stag = xr.DataArray(eta_stag, dims='bottom_top_stag', name='eta')
         self.rdnw = 1./self.eta_stag.diff('bottom_top_stag').rename(bottom_top_stag='bottom_top')
 
         # calculate column functions
@@ -92,8 +96,7 @@ class RealInit(object):
 
         Some base state quantities are initialized here...
         """
-        # automatic eta computed in dyn_em/module_initailize_real.F
-        assert p_d is not None, 'WRF compute_eta not implemented, need to specify target p_d'
+        assert p_d is not None, 'Need to call get_zlevels_auto to get eta levels'
         
         # calculate eta from known dry pressure
         print('Computing eta from',p_d.values)
@@ -180,14 +183,19 @@ class RealInit(object):
             strat = np.where(self.pb < self.pstrat)
             self.Td[strat] = self.Tmin \
                     + self.Tlpstrat*np.log(self.pb / self.pstrat)
+        self.Td.name = 'Tdry'
 
         # reference dry potential temperature (WRF Eqn. 5.5)
         self.thd = self.Td * (self.p_0 / self.pb)**(self.R_d/self.Cp_d)
+        self.thd.name = 'TH'
 
         # reciprocal reference density (WRF Eqn. 5.6)
         self.alb = (self.R_d*self.thd)/self.p_0 \
                  * np.power(self.pb / self.p_0, -1./Gamma, dtype=self.dtype)
+        self.alb.name = 'ALB'
+
         self.rb = 1. / self.alb
+        self.rb.name = 'RB'
 
         # base-state geopotential from hypsometric equation
         stag_dims = {'bottom_top_stag':len(self.eta_stag)}
@@ -197,7 +205,8 @@ class RealInit(object):
         pfd = get_lo_faces(self.C3f)*self.mub + get_lo_faces(self.C4f) + self.p_top
         phm =              self.C3h *self.mub +              self.C4h  + self.p_top
         dphb = self.alb*phm * np.log(pfd/pfu)
-        self.phb = xr.DataArray(np.zeros(tuple(stag_dims.values())), dims=stag_dims)
+        self.phb = xr.DataArray(np.zeros(tuple(stag_dims.values())),
+                                dims=stag_dims, name='PHB')
         self.phb.loc[dict(bottom_top_stag=slice(1,None))] = dphb.cumsum('bottom_top').values
         self.phb += self.g * self.z_surf
         #DEBUG:
@@ -207,3 +216,86 @@ class RealInit(object):
         self.phm = phm
 
 
+def blending_func(eta, etac=0.2):
+    """Relative weighting function to blend between terrain-following sigma
+    corodinate and pure pressure coordinate, B(η)
+
+    see dyn_em/nest_init_utils.F
+    """
+    if eta < etac:
+        return 0
+    B1 = 2. * etac**2 * ( 1. - etac )
+    B2 = -etac * ( 4. - 3. * etac - etac**3 )
+    B3 = 2. * ( 1. - etac**3 )
+    B4 = - ( 1. - etac**2 )
+    B5 = (1.-etac)**4
+    return ( B1 + B2*eta + B3*eta**2 + B4*eta**3 ) / B5
+
+
+def get_zlevels_auto(nlev,
+                     dzbot=50.,
+                     dzmax=1000.,
+                     dzstretch_s=1.3,
+                     dzstretch_u=1.1,
+                     ptop=5000.,T0=290.,verbose=False):
+    """Following the description in the WRF User's Guide, vertical
+    grid levels can be determined based on surface and maximum grid
+    spacings (dz0, dzmax) and the surface and upper stretching factors
+    (s0, s). Assuming an isothermal atmosphere T0 that is hard-coded in
+    WRF.
+
+    Returns _staggered_ grid heights, pressure levels, and eta levels.
+
+    See `levels` subroutine in dyn_em/module_initialize_real.F
+    """
+    zup = np.zeros(nlev+1) # Staggered grid heights (high side). In WRF, zup
+    pup = np.zeros(nlev+1) #   and pup range from 1:nlev (inclusive) whereas
+    eta = np.zeros(nlev+1) #   eta ranges from 0:nlev; here, we dimension
+                           #   zup and pup to have size nlev+1 so that the
+                           #   indices in both codes match for convenience
+    zscale = R_d * T0 / CONST_GRAV
+    ztop = zscale * np.log(p_0 / ptop)
+    dz = dzbot
+    zup[1] = dzbot
+    pup[0] = p_0
+    pup[1] = p_0 * np.exp(-zup[1]/zscale)
+    eta[0] = 1.0
+    eta[1] = (pup[1] - ptop) / (p_0 - ptop)
+    if verbose:
+        print(0,None,zup[0],eta[0]) # zup[0] doesn't exist in WRF
+        print(1,dz,zup[1],eta[1])
+    for i in range(1,nlev):
+        a = dzstretch_u + (dzstretch_s - dzstretch_u) \
+                        * max((0.5*dzmax - dz)/(0.5*dzmax), 0)
+        dz = a * dz
+        dztest = (ztop - zup[i]) / (nlev-i)
+        if dztest < dz:
+            if verbose:
+                print('--- now, constant dz ---')
+            break
+        zup[i+1] = zup[i] + dz
+        pup[i+1] = p_0 * np.exp(-zup[i+1]/zscale)
+        eta[i+1] = (pup[i+1] - ptop) / (p_0 - ptop)
+        if verbose:
+            print(i+1,dz,zup[i+1],eta[i+1],'a=',a)
+        assert i < nlev, 'Not enough eta levels to reach p_top, need to:'\
+                         ' (1) add more eta levels,'\
+                         ' (2) increase p_top to reduce domain height,'\
+                         ' (3) increase min dz, or'\
+                         ' (4) increase the stretching factor(s)'
+    dz = (ztop - zup[i]) / (nlev - i)
+    assert dz <= 1.5*dzmax, 'Upper levels may be too thick, need to:'\
+                            ' (1) add more eta levels,'\
+                            ' (2) increase p_top to reduce domain height,'\
+                            ' (3) increase min dz'\
+                            ' (4) increase the stretching factor(s), or'\
+                            ' (5) increase max dz'
+    ilast = i
+    for i in range(ilast,nlev):
+        zup[i+1] = zup[i] + dz
+        pup[i+1] = p_0 * np.exp(-zup[i+1]/zscale)
+        eta[i+1] = (pup[i+1] - ptop) / (p_0 - ptop)
+        if verbose:
+            print(i+1,dz,zup[i+1],eta[i+1])
+    assert np.allclose(ztop,zup[-1])
+    return zup,pup,eta
